@@ -40,7 +40,7 @@ Every answer is **one clean JSON document**.
 | 🎮 **Any UE game** | Per-game profiles: paks folder, CUE4Parse version, AES keys, `.usmap` mappings and export defaults. |
 | 🧭 **Guided setup** | `detect` finds the Paks folder and reads the engine version from the executable. `probe` tests keys and mappings and returns a verdict. |
 | ⚡ **Batch mode** | Mount once, run hundreds of commands, get NDJSON back. |
-| 🐧 **Cross-platform** | Self-contained single binary for Windows and Linux, with no runtime to install. Windows is validated on real games; the Linux build compiles but has not been run on a real game yet. |
+| 🐧 **Cross-platform** | Self-contained single binary for Windows and Linux, with no runtime to install. Windows is validated on real games. Linux runs in CI (contract and natives download) but has not been tested on a real game yet. |
 | 🔐 **Secret-safe** | AES keys stay in your local config. uex never prints them. |
 | 📦 **Faithful exports** | On the reference game, psk/pskx/psa, PNG, raw files and property JSON came out **byte-identical** to a direct CUE4Parse export. glTF, UEFormat and USD (levels) are also available. |
 
@@ -275,7 +275,7 @@ MSYS rewrites `/Game/...` into `C:/Program Files/Git/Game/...`. uex undoes that 
 <details>
 <summary><b>Status on Linux?</b></summary>
 
-The Linux x64 binary is built from the same code, with Linux natives naming, XDG config paths and SkiaSharp's Linux assets, but it **has not been run against a real game yet**. Reports are welcome. `setup natives --download` relies on CUE4Parse's built-in download URLs and has not been exercised yet either. Animation export on Linux needs a self-built `libCUE4Parse-Natives.so`.
+The Linux x64 binary runs in CI on Ubuntu: JSON contract, exit codes, and `setup natives --download`, which fetches Oodle and zlib-ng. It **has not been run against a real game yet**; reports are welcome. Animation export on Linux needs a self-built `libCUE4Parse-Natives.so`.
 </details>
 
 ## ⚖️ Legal
