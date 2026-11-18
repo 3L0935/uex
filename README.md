@@ -15,6 +15,7 @@ Browse and extract any UE4 / UE5 game's `.pak` / `.utoc` archives from the comma
 Meshes, textures, materials, animations, sounds, data tables and whole levels, with no GUI and no clicking.<br>
 Every answer is **one clean JSON document**.
 
+[![build](https://github.com/3L0935/uex/actions/workflows/build.yml/badge.svg)](https://github.com/3L0935/uex/actions/workflows/build.yml)
 [![release](https://img.shields.io/github/v/release/3L0935/uex?color=8A2BE2)](https://github.com/3L0935/uex/releases/latest)
 ![platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux-informational)
 ![.NET](https://img.shields.io/badge/.NET-10-512BD4)

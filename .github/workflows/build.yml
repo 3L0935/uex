@@ -1,0 +1,82 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, rid: win-x64,   exe: uex.exe }
+          - { os: ubuntu-latest,  rid: linux-x64, exe: uex }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish (self-contained single file)
+        run: >
+          dotnet publish uex.csproj -c Release -r ${{ matrix.rid }} --self-contained true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=none -o out
+
+      - name: Smoke test (JSON contract, exit codes, natives download)
+        shell: bash
+        env:
+          UEX_CONFIG: ${{ runner.temp }}/uex/config.json
+        run: |
+          set -u
+          U=./out/${{ matrix.exe }}
+          PY=$(command -v python3 || command -v python)
+          json() { "$PY" -c "import json,sys; d=json.load(sys.stdin); assert d['ok'] is $1, d; print(d['command'], 'ok' if d['ok'] else d['error']['code'])"; }
+          $U help                          | json True
+          $U doctor                        | json True
+          $U versions --filter 'UE5_5$'    | json True
+          $U setup natives --download      | json True
+          $U doctor | "$PY" -c "import json,sys; d=json.load(sys.stdin)['data']; print({n['id']: n['found'] for n in d['natives']})"
+          set +e
+          expect() { want=$1; shift; $U "$@" > r.json; c=$?; json False < r.json || exit 1; [ "$c" = "$want" ] || { echo "exit $c, expected $want"; exit 1; }; }
+          expect 2 frobnicate
+          expect 3 info
+          expect 4 setup detect ./nope
+          echo "contract ok"
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir dist
+          if [ "${{ matrix.rid }}" = "win-x64" ]; then
+            (cd out && 7z a ../dist/uex-${{ matrix.rid }}.zip ${{ matrix.exe }} > /dev/null)
+          else
+            tar -czf dist/uex-${{ matrix.rid }}.tar.gz -C out ${{ matrix.exe }}
+          fi
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uex-${{ matrix.rid }}
+          path: dist/*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
