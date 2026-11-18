@@ -1,0 +1,12 @@
+bin/
+obj/
+out/
+publish/
+*.user
+.vs/
+.idea/
+# local config and natives must never be committed (they hold AES keys / third-party binaries)
+uex.config.json
+config.json
+natives/
+uex_export/

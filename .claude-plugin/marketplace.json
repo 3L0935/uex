@@ -1,0 +1,11 @@
+{
+  "name": "uex",
+  "owner": { "name": "3L0935" },
+  "plugins": [
+    {
+      "name": "uex",
+      "source": "./",
+      "description": "Install and drive uex: browse and extract Unreal Engine game archives from an agent."
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "uex",
+  "version": "0.1.0",
+  "description": "Skill that installs and drives uex, a JSON-first CLI to browse and extract Unreal Engine (UE4/UE5) game archives.",
+  "author": { "name": "3L0935" },
+  "homepage": "https://github.com/3L0935/uex",
+  "repository": "https://github.com/3L0935/uex",
+  "license": "MIT",
+  "keywords": ["unreal", "ue5", "cue4parse", "fmodel", "pak", "extraction", "modding"]
+}
