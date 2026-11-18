@@ -1,3 +1,5 @@
+using CUE4Parse.UE4.Assets.Exports;
+using CUE4Parse_Conversion;
 using System.Text;
 using System.Text.RegularExpressions;
 using CUE4Parse.Compression;
@@ -260,9 +262,24 @@ static partial class Cmds
         int failed = picks.Count - ok;
         string allErr = string.Join(" ", errors.Select(e => e.ToString()));
 
+        // conversion test: parsing properties is not enough (a wrong version can parse props yet fail meshes,
+        // e.g. "Mesh has no LOD data"). Really convert a few meshes + textures into a temp folder.
+        var conv = a.Flag("no-convert") ? null : ConvertTest(s, pkgs, a.Int("convert", 2));
+        int convFailed = conv?.Failed ?? 0;
+
+        // key check #2: archives whose index is clear but files are encrypted mount with ANY key.
+        // Decrypt a few encrypted legacy-pak .uasset and look for the package magic C1 83 2A 9E.
+        var keyCheck = EncryptedMagicCheck(p);
+
         var hints = new List<string>();
         string verdict;
-        if (pkgs.Count == 0 && locked.Count > 0) { verdict = "needs_aes"; hints.Add("every archive is locked: provide the AES key(s) for requiredKeys[].guid (--aes for the all-zero guid, --aes-key <guid>=<key> for others)"); }
+        if (s.BadKeys > 0) { verdict = "bad_aes_key"; hints.Add("a submitted AES key fails the decryption test (see keyResults[].valid=false): it is wrong for this game build. Ask the user for the correct key"); }
+        else if (keyCheck is { tested: >= 2, magicOk: 0 })
+        {
+            verdict = "bad_aes_key";
+            hints.Add("encrypted packages decrypt to garbage (no Unreal package signature): the AES key is wrong for this game build. Ask the user for the correct key");
+        }
+        else if (pkgs.Count == 0 && locked.Count > 0) { verdict = "needs_aes"; hints.Add("every archive is locked: provide the AES key(s) for requiredKeys[].guid (--aes for the all-zero guid, --aes-key <guid>=<key> for others)"); if (required.Any(k => k.isMainKey)) hints.Add("some games flag their paks as encrypted with an all-zero key: try --aes 0x" + new string('0', 64) + " before asking the user"); }
         else if (pkgs.Count == 0) { verdict = "no_packages"; hints.Add("nothing mounted: wrong folder, or --recursive needed, or archives need natives (oodle)"); }
         else if (picks.Count > 0 && failed * 2 > picks.Count)
         {
@@ -271,8 +288,13 @@ static partial class Cmds
                                              : "most sample packages fail: try another --version (game-specific one first, see `uex versions --filter <game>`) or a newer .usmap");
             if (Regex.IsMatch(allErr, "oodle", RegexOptions.IgnoreCase)) hints.Add("errors mention Oodle: run `uex setup natives`");
         }
+        else if (conv?.AnyKindAllFailed == true)
+        {
+            verdict = "convert_errors";
+            hints.Add("packages parse but meshes/textures fail to convert: usually the wrong --version for this build (e.g. a game-specific *_Old vs current one, or another GAME_UE5_x). Try the other candidates and re-probe");
+        }
         else if (locked.Count > 0) { verdict = "partial_aes"; hints.Add($"{locked.Count} archive(s) still locked (often DLC/optional chunks); add their keys if you need their content"); }
-        else if (failed > 0) { verdict = "ok_with_errors"; hints.Add("a few sample packages fail; usually fine (exotic classes). Re-check with the assets you actually need"); }
+        else if (failed > 0 || convFailed > 0) { verdict = "ok_with_errors"; hints.Add("a few sample packages or conversions fail; usually fine (exotic classes). Re-check with the assets you actually need"); }
         else verdict = "ok";
 
         object saved = null;
@@ -302,6 +324,8 @@ static partial class Cmds
             mappingsUsed = s.MappingsPath,
             natives = s.NativeState,
             sample = new { tried = picks.Count, ok, failed, errors = errors.Take(6) },
+            convert = conv,
+            encryptedCheck = keyCheck,
             saved,
             nextSteps = saved != null ? new[] { $"uex info -g {saveId}" } : verdict.StartsWith("ok") ? new[] { "rerun the same probe with --save <id> [--default]" } : Array.Empty<string>(),
         };
@@ -377,5 +401,89 @@ static partial class Cmds
                 OperatingSystem.IsWindows() ? null : "Linux: libCUE4Parse-Natives.so (ACL, animations) is not distributed; build it from the CUE4Parse repo (CUE4Parse-Natives, CMake) or skip animations",
             }.Where(h => h != null),
         };
+    }
+}
+
+static partial class Cmds
+{
+    sealed class ConvResult
+    {
+        public int Tried { get; set; }
+        public int Ok { get; set; }
+        public int Failed { get; set; }
+        /// <summary>A kind (static mesh / skeletal mesh / texture) where every tested asset failed: strong sign of a wrong version.</summary>
+        public bool AnyKindAllFailed { get; set; }
+        public List<object> Items { get; } = new();
+    }
+
+    /// <summary>Convert up to perKind StaticMesh / SkeletalMesh / Texture2D (picked by name prefix, spread over the game) into a temp folder, then delete it.</summary>
+    static ConvResult ConvertTest(Session s, List<string> pkgs, int perKind)
+    {
+        var r = new ConvResult();
+        if (perKind <= 0 || pkgs.Count == 0) return r;
+        var tmp = Path.Combine(Path.GetTempPath(), "uex-probe-" + Guid.NewGuid().ToString("N")[..8]);
+        var opts = Options(new ExportConfig { ExportMaterials = false }, CliArgs.Parse(Array.Empty<string>()));
+        var kinds = new (string rx, string cls)[]
+        {
+            (@"/SM_[^/]*\.uasset$", "StaticMesh"),
+            (@"/(SK|SKM)_[^/]*\.uasset$", "SkeletalMesh"),
+            (@"/T_[^/]*\.uasset$", "Texture2D"),
+        };
+        try
+        {
+            foreach (var (rx, cls) in kinds)
+            {
+                var cands = pkgs.Where(k => Regex.IsMatch(k, rx, RegexOptions.IgnoreCase)).ToList();
+                if (cands.Count == 0) continue;
+                int step = Math.Max(1, cands.Count / 10), tried = 0, okKind = 0;
+                for (int i = 0; i < cands.Count && tried < perKind && i < step * 10; i += step)
+                {
+                    var k = cands[i];
+                    UObject main;
+                    try { main = s.Provider.LoadPackage(k).GetExports().FirstOrDefault(e => e.ExportType == cls); }
+                    catch { continue; }   // parse failures are already reported by the sample test
+                    if (main == null) continue;
+                    tried++; r.Tried++;
+                    string err = null;
+                    try
+                    {
+                        var es = new ExportSession(null);
+                        es.Add(main);
+                        var res = es.RunAsync(tmp, opts, null, CancellationToken.None).GetAwaiter().GetResult();
+                        err = res.Where(x => !x.Success).Select(x => x.Error == null ? "failed" : Output.Unwrap(x.Error)).FirstOrDefault();
+                    }
+                    catch (Exception e) { err = Output.Unwrap(e); }
+                    if (err == null) { r.Ok++; okKind++; } else r.Failed++;
+                    r.Items.Add(new { path = k, @class = cls, ok = err == null, error = err });
+                }
+                if (tried > 0 && okKind == 0) r.AnyKindAllFailed = true;
+            }
+        }
+        finally { try { if (Directory.Exists(tmp)) Directory.Delete(tmp, true); } catch { } }
+        return r;
+    }
+}
+
+static partial class Cmds
+{
+    sealed record MagicCheck(int tested, int magicOk);
+
+    /// <summary>null when nothing applies (no encrypted legacy-pak .uasset, e.g. IoStore-only or unencrypted games).</summary>
+    static MagicCheck EncryptedMagicCheck(CUE4Parse.FileProvider.DefaultFileProvider p)
+    {
+        var cands = p.Files.Values
+            .Where(f => f.IsEncrypted && f.Path.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase) && f.Size is > 64 and < 4_000_000
+                        && !f.GetType().Name.Contains("IoStore", StringComparison.OrdinalIgnoreCase))
+            .Take(400).ToList();
+        if (cands.Count == 0) return null;
+        int tested = 0, okMagic = 0, step = Math.Max(1, cands.Count / 6);
+        for (int i = 0; i < cands.Count && tested < 6; i += step)
+        {
+            byte[] b;
+            try { b = cands[i].Read(); } catch { tested++; continue; }
+            tested++;
+            if (b.Length >= 4 && b[0] == 0xC1 && b[1] == 0x83 && b[2] == 0x2A && b[3] == 0x9E) okMagic++;
+        }
+        return new MagicCheck(tested, okMagic);
     }
 }

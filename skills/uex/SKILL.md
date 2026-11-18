@@ -70,15 +70,17 @@ Follow this loop. Each step's JSON tells you the next one (`data.nextSteps`, `da
    - or `uex setup natives --download` (oodle + zlib-ng only).
    - ACL (`CUE4Parse-Natives`) is needed only for animations. On Linux it has to be built from the CUE4Parse repo.
 3. `uex setup detect "<game install folder>"`: returns the Paks folder, the engine version read from the executable, `recommendedVersion` (a game-specific CUE4Parse version beats a generic `GAME_UE5_x`), and the exact probe command.
-4. `uex setup probe --paks "<Paks>" --version <v>`: mounts without saving. Act on `data.verdict`:
+4. `uex setup probe --paks "<Paks>" --version <v>`: mounts without saving. It tests the keys, parses sample packages and converts a few meshes and textures (~10–20 s; `--no-convert` skips the conversion). Act on `data.verdict`:
 
 | verdict | do |
 |---|---|
 | `ok` / `ok_with_errors` | save it (step 5) |
-| `needs_aes` | **ask the user** for the AES key(s) of `data.requiredKeys[].guid`. Add `--aes <key>` for guid `000…0`, `--aes-key <guid>=<key>` for others, then probe again |
+| `needs_aes` | first try the all-zero key (`--aes 0x` + 64 zeros): some games flag paks as encrypted with a null key. Otherwise **ask the user** for the AES key(s) of `data.requiredKeys[].guid`. Add `--aes <key>` for guid `000…0`, `--aes-key <guid>=<key>` for others, then probe again |
+| `bad_aes_key` | a key fails the decryption test (`keyResults[].valid=false`) or packages decrypt to garbage. The key is wrong for this build: ask the user again |
 | `partial_aes` | usable; extra keys only unlock the listed archives (DLC/optional) |
 | `needs_mappings` | **ask the user** for a `.usmap` matching the game's current version; add `--mappings <file or folder>` |
 | `load_errors` | try another `--version` (`uex versions --filter <game or ue5>`), or a newer .usmap |
+| `convert_errors` | packages parse but meshes/textures fail to convert (`data.convert.items`). Wrong version: try the other candidates, e.g. a game-specific `*_Old` vs current |
 | `no_packages` | wrong folder, try `--recursive`, or natives missing |
 
 5. Add the same probe arguments plus `--save <id> --default`, or run `uex games add <id> --paks … --version …`.
@@ -98,7 +100,7 @@ uex props /Game/Data/DT_Items --out items.json  # properties -> file (stdout is 
 uex export /Game/Meshes/SM_Chair --out out      # mesh (+materials json +textures png), texture, anim (.psa), material
 uex export --list paths.txt --out out           # one path per line; '-' = stdin
 uex raw MyGame/Content/WwiseAudio/Cooked/X.bnk --out raw # raw bytes of any archive file
-uex map /Game/Maps/Level01 --format gltf --out level     # whole level as a scene
+uex map /Game/Maps/Level01 --out level                   # whole level (World) as USD + assets
 ```
 
 Path forms accepted: `MyGame/Content/X.uasset` (mount path, exactly as `search` prints it), `/Game/X`, `/Game/X.X`, `Class'/Game/X.X'`, `/Game/X.X:Sub`.

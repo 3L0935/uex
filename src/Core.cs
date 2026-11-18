@@ -31,7 +31,7 @@ sealed class CliArgs
 {
     static readonly HashSet<string> BoolFlags = new(StringComparer.OrdinalIgnoreCase)
     {
-        "pretty", "verbose", "help", "recursive", "no-recursive", "force", "all", "download", "default", "keep-tree", "stop-on-error", "no-materials",
+        "pretty", "verbose", "help", "recursive", "no-recursive", "force", "all", "download", "default", "keep-tree", "stop-on-error", "no-materials", "no-convert",
     };
     static readonly Dictionary<string, string> Short = new() { ["-g"] = "game", ["-o"] = "out", ["-h"] = "help", ["-n"] = "limit" };
 

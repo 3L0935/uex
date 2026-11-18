@@ -121,7 +121,8 @@ static partial class Cmds
         foreach (var arg in a.Pos)
         {
             var key = arg.Replace('\\', '/').TrimStart('/');
-            if (!p.TryGetGameFile(key, out var gf)) { bad++; var nf = c.Session.NotFound(arg); items.Add(new { path = arg, ok = false, error = nf.Message, details = nf.Details }); continue; }
+            if (!p.TryGetGameFile(key, out var gf) && a.Pos.Count == 1) throw c.Session.NotFound(arg);
+            if (gf == null) { bad++; var nf = c.Session.NotFound(arg); items.Add(new { path = arg, ok = false, error = nf.Message, details = nf.Details }); continue; }
             try
             {
                 var dst = tree ? Path.Combine(dir, gf.Path.Replace('/', Path.DirectorySeparatorChar)) : Path.Combine(dir, gf.Name);

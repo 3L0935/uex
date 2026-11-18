@@ -20,6 +20,7 @@ sealed class Session : IDisposable
     public string MappingsPath;
     public Dictionary<string, bool> NativeState;
     public List<object> KeyResults = new();
+    public int BadKeys;
 
     /// <summary>Archives still locked by a missing key. global.utoc (IoStore global container) is loaded separately and never counts.</summary>
     public List<CUE4Parse.UE4.VirtualFileSystem.IAesVfsReader> Locked => Provider.UnloadedVfs.Where(v => !v.Name.Equals("global.utoc", StringComparison.OrdinalIgnoreCase)).ToList();
@@ -90,10 +91,27 @@ sealed class Session : IDisposable
             FGuid guid;
             try { guid = string.IsNullOrEmpty(guidText) ? new FGuid() : new FGuid(Keys.NormGuid(guidText)); }
             catch (Exception) { warnings.Add($"ignored AES key: bad GUID '{guidText}'"); return; }
+            var aesKey = new FAesKey(Keys.NormKey(key));
+            // SubmitKey alone can "mount" with a wrong key (garbage reads later look like a mappings problem):
+            // test it on the locked archives of that GUID first.
+            var targets = s.Provider.UnloadedVfs.Where(v => v.EncryptionKeyGuid == guid && v.IsEncrypted).ToList();
+            int tested = 0, valid = 0;
+            foreach (var v in targets.Take(8))
+            {
+                try { tested++; if (v.TestAesKey(aesKey)) valid++; }
+                catch { }
+            }
+            if (tested > 0 && valid == 0)
+            {
+                s.KeyResults.Add(new { guid = guid.ToString(), valid = false, archivesMounted = 0, tested });
+                warnings.Add($"AES key for guid {guid} is WRONG: it fails the decryption test on {tested} archive(s); not submitted");
+                s.BadKeys++;
+                return;
+            }
             int n;
-            try { n = s.Provider.SubmitKey(guid, new FAesKey(Keys.NormKey(key))); }
+            try { n = s.Provider.SubmitKey(guid, aesKey); }
             catch (Exception e) { warnings.Add($"AES key for guid {guid} rejected: {Output.Unwrap(e)}"); return; }
-            s.KeyResults.Add(new { guid = guid.ToString(), archivesMounted = n });
+            s.KeyResults.Add(new { guid = guid.ToString(), valid = tested > 0 ? true : (bool?)null, archivesMounted = n });
         }
         Submit(null, aes.Main);
         foreach (var kv in aes.Dynamic ?? new()) Submit(kv.Key, kv.Value);

@@ -15,7 +15,6 @@ Browse and extract any UE4 / UE5 game's `.pak` / `.utoc` archives from the comma
 Meshes, textures, materials, animations, sounds, data tables and whole levels, with no GUI and no clicking.<br>
 Every answer is **one clean JSON document**.
 
-[![build](https://github.com/3L0935/uex/actions/workflows/build.yml/badge.svg)](https://github.com/3L0935/uex/actions/workflows/build.yml)
 [![release](https://img.shields.io/github/v/release/3L0935/uex?color=8A2BE2)](https://github.com/3L0935/uex/releases/latest)
 ![platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux-informational)
 ![.NET](https://img.shields.io/badge/.NET-10-512BD4)
@@ -40,9 +39,9 @@ Every answer is **one clean JSON document**.
 | 🎮 **Any UE game** | Per-game profiles: paks folder, CUE4Parse version, AES keys, `.usmap` mappings and export defaults. |
 | 🧭 **Guided setup** | `detect` finds the Paks folder and reads the engine version from the executable. `probe` tests keys and mappings and returns a verdict. |
 | ⚡ **Batch mode** | Mount once, run hundreds of commands, get NDJSON back. |
-| 🐧 **Cross-platform** | Windows and Linux, self-contained single binary with no runtime to install. |
+| 🐧 **Cross-platform** | Self-contained single binary for Windows and Linux, with no runtime to install. Windows is validated on real games; the Linux build compiles but has not been run on a real game yet. |
 | 🔐 **Secret-safe** | AES keys stay in your local config. uex never prints them. |
-| 📦 **Byte-identical exports** | Same output as a direct CUE4Parse/FModel-style export: psk/pskx/psa, glTF, UEFormat, USD, PNG, material JSON. |
+| 📦 **Faithful exports** | On the reference game, psk/pskx/psa, PNG, raw files and property JSON came out **byte-identical** to a direct CUE4Parse export. glTF, UEFormat and USD (levels) are also available. |
 
 ## 🚀 Quick start
 
@@ -60,7 +59,7 @@ Invoke-WebRequest https://github.com/3L0935/uex/releases/latest/download/uex-win
 **First run.**
 
 ```bash
-uex setup natives --download                         # Oodle + zlib-ng decompressors
+uex setup natives --from "<FModel>/Output/.data"     # Oodle/zlib/Detex decompressors (or --download)
 uex setup detect "D:/SteamLibrary/steamapps/common/MyGame"
 uex setup probe --paks "D:/.../MyGame/Content/Paks" --version GAME_UE5_5 --aes 0x… --save mygame
 uex search "SM_.*Chair"
@@ -96,7 +95,7 @@ uex ships with a **skill** that teaches an AI agent how to install it, set up a 
 /plugin install uex@uex
 ```
 
-Or copy `skills/uex/` into `~/.claude/skills/`. Other agents (Codex, Cursor, Aider…) can be pointed at [`AGENTS.md`](AGENTS.md).
+The skill is then available as `/uex:uex`. You can also copy just the `skills/uex/` folder to `~/.claude/skills/uex/` to get a personal `/uex` skill; pick one method, not both. Other agents (Codex, Cursor, Aider…) can be pointed at [`AGENTS.md`](AGENTS.md).
 
 ### The contract
 
@@ -129,9 +128,9 @@ flowchart LR
     A[uex doctor] --> B[uex setup natives]
     B --> C[uex setup detect &lt;install dir&gt;]
     C --> D{uex setup probe}
-    D -- needs_aes --> E[ask user for AES key<br/>--aes / --aes-key guid=key]
+    D -- needs_aes / bad_aes_key --> E[ask user for AES key<br/>--aes / --aes-key guid=key]
     D -- needs_mappings --> F[ask user for .usmap<br/>--mappings]
-    D -- load_errors --> G[try another --version]
+    D -- load_errors / convert_errors --> G[try another --version]
     E --> D
     F --> D
     G --> D
@@ -149,8 +148,9 @@ flowchart LR
 `setup probe` mounts **without saving** and returns:
 - the archives still locked, grouped by **key GUID**;
 - how many archives each submitted key opened;
-- a load test on packages sampled across the game;
-- a `verdict` (`ok`, `needs_aes`, `partial_aes`, `needs_mappings`, `load_errors`, `no_packages`) with hints.
+- a check that each AES key really decrypts (wrong keys are rejected, never silently "mounted");
+- a parse test on packages sampled across the game, then a **real conversion** of a few meshes and textures. A wrong version can parse properties yet fail meshes, and this step catches it;
+- a `verdict` (`ok`, `needs_aes`, `bad_aes_key`, `partial_aes`, `needs_mappings`, `load_errors`, `convert_errors`, `no_packages`) with hints.
 
 When it is green, add `--save <id>` and you are done.
 
@@ -174,7 +174,7 @@ When it is green, add `--save <id>` and you are done.
 | `props <pkg> [--export n] [--class c] [--out f]` | properties as JSON |
 | `export <pkg>… [--list f\|-]` | meshes (+materials +textures), textures, animations, materials; anything else as JSON |
 | `raw <file>…` | raw bytes (`.bnk`, `.wem`, `.ini`, `.uasset`…) |
-| `map <pkg> [--format usd\|gltf\|actorx\|ueformat]` | a whole level as a scene |
+| `map <pkg>` | a whole level (World) as a USD scene; DBD-style tile maps also accept `--format gltf\|actorx\|ueformat` |
 | `batch <file\|->` | many commands, one mount, NDJSON out |
 
 Paths can be given as mount paths (`MyGame/Content/X.uasset`, exactly as `search` prints them) or in the usual Unreal forms: `/Game/X`, `/Game/X.X`, `Class'/Game/X.X'`, `/Game/X.X:Sub`.
@@ -228,8 +228,8 @@ CUE4Parse uses optional native libraries. uex never bundles them. Instead, `uex 
 
 | id | needed for | Windows | Linux |
 |---|---|---|---|
-| `oodle` | Oodle-compressed archives (most modern games) | ✅ `--download` | ✅ `--download` |
-| `zlib` | zlib-compressed archives | ✅ `--download` | ✅ `--download` |
+| `oodle` | Oodle-compressed archives (most modern games) | `--download`, or `--from` FModel's `.data` | `--download` |
+| `zlib` | zlib-compressed archives | `--download`, or `--from` FModel's `.data` | `--download` |
 | `acl` | **animation** export (ACL codec) | `CUE4Parse-Natives.dll`, e.g. from FModel | build `libCUE4Parse-Natives.so` from CUE4Parse |
 | `detex` | rare texture formats | `Detex.dll`, e.g. from FModel | - |
 
@@ -241,7 +241,9 @@ dotnet publish -c Release -r linux-x64 --self-contained true -p:PublishSingleFil
 ./out/uex doctor
 ```
 
-You need the .NET 10 SDK. CI builds both platforms, runs a JSON-contract smoke test on each, and attaches the binaries to every `v*` tag.
+You need the .NET 10 SDK.
+
+> `dotnet build` prints NuGet audit warnings for `SixLabors.ImageSharp` 3.1.12 and `Microsoft.Bcl.Memory` 9.0.0. Both come from CUE4Parse-Conversion, which pins ImageSharp to that exact version, so uex cannot bump them on its own.
 
 ## ❓ FAQ
 
@@ -272,7 +274,7 @@ MSYS rewrites `/Game/...` into `C:/Program Files/Git/Game/...`. uex undoes that 
 <details>
 <summary><b>Status on Linux?</b></summary>
 
-CI builds the Linux binary and runs it on Ubuntu (contract and natives download). Real-game extraction has been validated on Windows; Linux uses the same code path. Animation export on Linux needs a self-built `libCUE4Parse-Natives.so`.
+The Linux x64 binary is built from the same code, with Linux natives naming, XDG config paths and SkiaSharp's Linux assets, but it **has not been run against a real game yet**. Reports are welcome. `setup natives --download` relies on CUE4Parse's built-in download URLs and has not been exercised yet either. Animation export on Linux needs a self-built `libCUE4Parse-Natives.so`.
 </details>
 
 ## ⚖️ Legal

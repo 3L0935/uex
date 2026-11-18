@@ -1,6 +1,9 @@
 {
   "name": "uex",
-  "owner": { "name": "3L0935" },
+  "owner": {
+    "name": "3L0935"
+  },
+  "description": "uex: drive a JSON-first Unreal Engine (UE4/UE5) asset extractor from Claude Code",
   "plugins": [
     {
       "name": "uex",
