@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
-"""uexgif - turntable GIF renderer for uex (CUE4Parse) exports.
+"""uexgif - turntable renderer for uex (CUE4Parse) exports.
 
-Takes the .psk / textures that `uex export` produced and renders the assembled
-model rotating on itself as a GIF, with albedo textures, no GPU, no Blender:
-pure numpy rasterizer (z-buffer, per-pixel affine UV, lambert + rim light).
+Takes the .psk/.pskx meshes and .png textures that `uex export` produced and
+renders the assembled model rotating on itself, in its bind pose, with albedo
+textures, sun + sky lighting. No GPU, no Blender, no engine: a numpy rasterizer
+(z-buffer, per-pixel affine UV, interpolated normals, Blinn spec, tonemap).
 
 Usage:
-  python3 uexgif.py /path/to/export_dir [more dirs...] -o myers.gif
-  python3 uexgif.py body/ tete/ masque/ suit/ -o myers.gif --frames 30 --size 460x620
+  python3 uexgif.py export/body export/mask -o preview.gif
+  python3 uexgif.py export/ -o preview.webp --frames 48 --size 720x960
+  python3 uexgif.py export/ -o sheet.png --format sprites
 
 Notes:
-  * Every .psk found under the given dirs is loaded and assembled in its bind
-    pose (that is the A-pose the mesh was cooked in), then rotated about Z (UE up).
-  * Textures are matched from the material names (MI_Foo -> T_Foo_ALB.png),
-    fuzzy fallback by token overlap.
+  * Every .psk/.pskx under the given paths is assembled in the same space (same
+    skeleton = same space) and rotated about Z, which is UE's up axis.
+  * Materials come from the MI_*.json uex writes next to each mesh (Textures,
+    Colors, Scalars), with a filename heuristic as a last resort.
+  * Masked materials (hair cards, eyelashes, mask holes) are alpha-tested.
 """
 from __future__ import annotations
 
@@ -36,7 +39,7 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):
         pass
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 # Pillow a deplace ses constantes (LANCZOS -> Image.Resampling.LANCZOS,
 # ADAPTIVE -> Image.Palette.ADAPTIVE): on accepte les deux generations.
@@ -64,44 +67,55 @@ def read_psk(path):
             off = data_off
         if off >= len(d):
             break
-    if "PNTS0000" not in chunks or "FACE0000" not in chunks or "VTXW0000" not in chunks:
-        raise SystemExit(f"{path}: pas un .psk ActorX exploitable (chunks: {sorted(chunks)})")
+    if ("PNTS0000" not in chunks or "VTXW0000" not in chunks
+            or not ({"FACE0000", "FACE3200"} & set(chunks))):
+        raise SystemExit(f"{path}: not a usable ActorX .psk (chunks: {sorted(chunks)})")
 
-    o, _, n = chunks["PNTS0000"]
+    def _chunk(name):
+        o, dsize, n = chunks[name]
+        if n <= 0:
+            raise SystemExit(f"{path}: empty chunk {name}")
+        if o + dsize * n > len(d):
+            raise SystemExit(f"{path}: chunk {name} truncated ({dsize}x{n} bytes)")
+        return o, dsize, n
+
+    o, _, n = _chunk("PNTS0000")
     points = np.frombuffer(d, dtype="<f4", count=n * 3, offset=o).reshape(n, 3).astype(np.float64)
 
-    # VTXW0000: 16 octets = index de point (16 bits non signe), 2 octets, u, v, mat, res, pad.
-    # Les jeux > 32767 points/wedges ecrivent les index en non signe (pas en signe):
-    # les lire en i16 produit des index negatifs et un maillage en charpie.
-    o, _, n = chunks["VTXW0000"]
-    w = np.frombuffer(d, dtype=np.dtype([("pt", "<u2"), ("u0", "<u2"), ("u", "<f4"), ("v", "<f4"),
-                                         ("mat", "u1"), ("res", "u1"), ("pad", "<i2")]),
-                       count=n, offset=o)
+    # VTXW0000 (16 bytes): point index, u, v, material, reserved. The point index is a
+    # 32-bit slot in practice: the 16-bit variant leaves the upper half at zero, while a
+    # mesh above 65 535 points needs the full word. Reading it as u16 wraps silently
+    # (the wrapped value stays < len(points), so a range test never fires), so read u32
+    # first and only fall back to u16 when the u32 values cannot be indices.
+    def _wedge_dtype(pt_fmt, dsize):
+        return np.dtype({"names": ["pt", "u", "v", "mat"],
+                         "formats": [pt_fmt, "<f4", "<f4", "u1"],
+                         "offsets": [0, 4, 8, 12], "itemsize": dsize})
+
+    o, dsize, n = _chunk("VTXW0000")
+    w = np.frombuffer(d, dtype=_wedge_dtype("<u4", dsize), count=n, offset=o)
+    if int(w["pt"].max()) >= len(points):
+        w16 = np.frombuffer(d, dtype=_wedge_dtype("<u2", dsize), count=n, offset=o)
+        if int(w16["pt"].max()) >= len(points):
+            raise SystemExit(f"{path}: wedge point index out of range")
+        w = w16
     wpt = w["pt"].astype(np.int32)
     wuv = np.stack([w["u"], w["v"]], axis=1).astype(np.float64)
     wmat = w["mat"].astype(np.int32)
-    if wpt.max() >= len(points):                      # variante 32 bits
-        w32 = np.frombuffer(d, dtype=np.dtype([("pt", "<i4"), ("u", "<f4"), ("v", "<f4"),
-                                               ("mat", "u1"), ("res", "u1"), ("pad", "<i2")]),
-                             count=n, offset=o)
-        if w32["pt"].max() < len(points):
-            wpt = w32["pt"].astype(np.int32)
-            wuv = np.stack([w32["u"], w32["v"]], axis=1).astype(np.float64)
-            wmat = w32["mat"].astype(np.int32)
 
-    # FACE0000: 3 index de wedge (16 bits non signe), mat, aux, smoothing
-    o, _, n = chunks["FACE0000"]
-    f = np.frombuffer(d, dtype=np.dtype([("a", "<u2"), ("b", "<u2"), ("c", "<u2"),
-                                         ("mat", "u1"), ("aux", "u1"), ("smooth", "<i4")]),
-                      count=n, offset=o)
+    # FACE0000 (12 bytes, 16-bit wedge indices) or FACE3200 (18 bytes, 32-bit indices
+    # above 65 536 wedges). The material byte sits right after the three indices.
+    fname = "FACE3200" if "FACE3200" in chunks else "FACE0000"
+    o, dsize, n = _chunk(fname)
+    wide = fname == "FACE3200" or dsize >= 18
+    fdt = np.dtype({"names": ["a", "b", "c", "mat"],
+                    "formats": ["<u4", "<u4", "<u4", "u1"] if wide else ["<u2", "<u2", "<u2", "u1"],
+                    "offsets": [0, 4, 8, 12] if wide else [0, 2, 4, 6], "itemsize": dsize})
+    f = np.frombuffer(d, dtype=fdt, count=n, offset=o)
     faces = np.stack([f["a"], f["b"], f["c"]], axis=1).astype(np.int32)
     fmat = f["mat"].astype(np.int32)
-    if faces.max() >= len(wpt):
-        f32 = np.frombuffer(d, dtype=np.dtype([("a", "<i4"), ("b", "<i4"), ("c", "<i4")]),
-                            count=n, offset=o)
-        cand = np.stack([f32["a"], f32["b"], f32["c"]], axis=1).astype(np.int32)
-        if cand.max() < len(wpt):
-            faces = cand
+    if int(faces.max()) >= len(wpt):
+        raise SystemExit(f"{path}: {fname} wedge index out of range")
 
     wnrm = None
     if "VTXNORMS" in chunks:
@@ -180,6 +194,8 @@ def pick_texture(mat, texfiles):
         if bt and bt[0] in ("m", "t"):
             bt = bt[1:]
         inter = len(set(mt) & set(bt))
+        if inter == 0:                      # aucun rapport: mieux vaut pas de texture
+            continue
         score = 1.5 + inter * 2 - abs(len(set(bt)) - len(set(mt))) * 0.2
         if score > best_score:
             best, best_score = f, score
@@ -232,9 +248,8 @@ def material_texture(mat, matdb, texidx, size=512, cache=None):
         a = _load_rgba(alb, size)
         rgb = np.power(a[..., :3], 2.2, dtype=np.float32)
         alpha = None
-        if op:                                    # opacite separee
-            o = _load_rgba(op, size)[..., 0]
-            alpha = o if o.shape == rgb.shape[:2] else None
+        if op:                                    # opacite separee (redimensionnee plus bas)
+            alpha = _load_rgba(op, size)[..., 0]
         elif a[..., 3].min() < 0.99:              # alpha dans l'albedo
             alpha = a[..., 3]
         info.update(rgb=rgb, alpha=alpha, src=os.path.basename(alb))
@@ -339,9 +354,11 @@ def render_frame(parts, angle_deg, W, H, center, scale,
         X, Y, Z = sx[pi], sy[pi], sz[pi]
         UV = part["uv"]
         NRM = part.get("nrm")
-
+        if NRM is not None:
+            NRM = NRM @ R.T          # les normales doivent tourner avec le modele,
+                                     # sinon l'eclairage reste colle a la peau
         area = (X[:, 1] - X[:, 0]) * (Y[:, 2] - Y[:, 0]) - (X[:, 2] - X[:, 0]) * (Y[:, 1] - Y[:, 0])
-        idx = np.nonzero(np.abs(area) > 0.35)[0]
+        idx = np.nonzero(np.abs(area) > 1e-6)[0]   # 0.35 laissait des trous sur les visages
         idx = idx[np.argsort(Z.mean(axis=1)[idx])]
 
         p0 = V[pi[:, 0]]
@@ -386,6 +403,10 @@ def render_frame(parts, angle_deg, W, H, center, scale,
             else:
                 n = np.broadcast_to(geo[i], (l0.shape[0], l0.shape[1], 3))
 
+            # surfaces double face (cheveux, cols): la normale doit regarder la camera
+            flip = np.where((n @ Vdir)[:, :, None] < 0.0, -1.0, 1.0)
+            n = n * flip
+
             ndl = np.clip(n @ Lkey, 0.0, None)
             ndf = np.clip(n @ Lfill, 0.0, None)
             ndr = np.clip(n @ Lrim, 0.0, None) ** 3
@@ -404,10 +425,10 @@ def render_frame(parts, angle_deg, W, H, center, scale,
             if tex is not None:
                 rgb = tex["rgb"]
                 th, tw = rgb.shape[:2]
-                u = l0 * UV[i, 0, 0] + l1 * UV[i, 1, 0] + l2 * UV[i, 2, 0]
-                v = l0 * UV[i, 0, 1] + l1 * UV[i, 1, 1] + l2 * UV[i, 2, 1]
-                tx = np.clip((u * (tw - 1)).astype(np.int32), 0, tw - 1)
-                ty = np.clip((v * (th - 1)).astype(np.int32), 0, th - 1)
+                u = np.mod(l0 * UV[i, 0, 0] + l1 * UV[i, 1, 0] + l2 * UV[i, 2, 0], 1.0)
+                v = np.mod(l0 * UV[i, 0, 1] + l1 * UV[i, 1, 1] + l2 * UV[i, 2, 1], 1.0)
+                tx = np.minimum((u * tw).astype(np.int32), tw - 1)
+                ty = np.minimum((v * th).astype(np.int32), th - 1)
                 alb = rgb[ty, tx]
                 if tex["alpha"] is not None:                 # alpha test (cheveux, cils, masque)
                     keep = tex["alpha"][ty, tx] >= tex["cutoff"]
@@ -439,76 +460,142 @@ def _draw_label(im, text):
     except Exception:
         font = None
     try:
-        d.text((10, im.size[1] - 18), text, fill=(125, 128, 138), font=font)
+        h = int(getattr(font, "size", 10)) * 2 if font is not None else 18
+        d.text((10, im.size[1] - h), text, fill=(125, 128, 138), font=font)
     except Exception:
         d.text((10, im.size[1] - 18), text, fill=(125, 128, 138))
 
 
-def fit_view(parts, margin=0.92):
+def fit_view(parts):
+    """Centre + rayon XY: le modele tourne autour de Z, donc c'est l'extension
+    horizontale maximale en rotation qui doit tenir, pas seulement X."""
     pts = np.concatenate([p["points"] for p in parts], axis=0)
     mn, mx = pts.min(axis=0), pts.max(axis=0)
     center = (mn + mx) / 2.0
+    d = pts - center
+    radius = float(np.max(np.hypot(d[:, 0], d[:, 1]))) if len(pts) else 1.0
     half = (mx - mn) / 2.0
-    return center, half
+    return center, half, radius
+
+
+def _global_palette(frames, colors=192):
+    """Une seule palette pour tout le GIF: des palettes par frame font scintiller le fond."""
+    step = max(1, len(frames) // 6)
+    sample = frames[::step][:6]
+    w, h = sample[0].size
+    sheet = Image.new("RGB", (w, h * len(sample)))
+    for i, f in enumerate(sample):
+        sheet.paste(f, (0, i * h))
+    return sheet.quantize(colors=colors, method=getattr(Image, "MEDIANCUT", 0))
+
+
+def _save_sprites(frames, out, cols=None):
+    n = len(frames)
+    cols = cols or int(math.ceil(math.sqrt(n)))
+    rows = int(math.ceil(n / cols))
+    w, h = frames[0].size
+    sheet = Image.new("RGB", (w * cols, h * rows), (20, 22, 28))
+    for i, f in enumerate(frames):
+        sheet.paste(f, ((i % cols) * w, (i // cols) * h))
+    sheet.save(out)
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Turntable GIF d'un export uex (.psk + textures)")
-    ap.add_argument("dirs", nargs="+", help="dossiers d'export (ou fichiers .psk)")
-    ap.add_argument("-o", "--out", default="turntable.gif")
-    ap.add_argument("--frames", type=int, default=36)
-    ap.add_argument("--size", default="440x600", help="LARGEURxHAUTEUR")
-    ap.add_argument("--fps", type=float, default=14.0)
-    ap.add_argument("--tex", type=int, default=512, help="taille max des textures")
-    ap.add_argument("--frames-dir", default=None, help="garde aussi les PNG")
-    ap.add_argument("--yaw", type=float, default=360.0)
-    ap.add_argument("--sun", type=float, default=1.0, help="intensite du soleil")
-    ap.add_argument("--sun-elev", type=float, default=35.0, help="hauteur du soleil (deg)")
-    ap.add_argument("--sun-azim", type=float, default=35.0, help="azimut du soleil (deg, 0=dans l'axe camera)")
-    ap.add_argument("--ambient", type=float, default=0.55, help="lumiere ambiante (ciel)")
-    ap.add_argument("--exposure", type=float, default=1.15)
-    ap.add_argument("--fill", type=float, default=0.35)
-    ap.add_argument("--rim", type=float, default=0.25)
-    ap.add_argument("--label", default=None, help="texte en bas de chaque frame (defaut: uexgif n/N)")
+    ap = argparse.ArgumentParser(
+        prog="uexgif",
+        description="Turntable renderer for uex exports: .psk meshes + .png textures -> GIF/WebP.")
+    ap.add_argument("paths", nargs="+", help="export folders and/or .psk/.pskx files")
+    ap.add_argument("-o", "--out", default="turntable.gif", help="output file")
+    ap.add_argument("--format", choices=["gif", "webp", "sprites"], default=None,
+                    help="gif (default), animated webp, or a PNG sprite sheet")
+    ap.add_argument("--frames", type=int, default=36, help="frames per loop")
+    ap.add_argument("--size", default="440x600", help="WIDTHxHEIGHT")
+    ap.add_argument("--fps", type=float, default=14.0, help="frame rate (GIF/WebP)")
+    ap.add_argument("--tex", type=int, default=512, help="max texture size fed to the renderer")
+    ap.add_argument("--frames-dir", default=None, help="also keep every PNG frame")
+    ap.add_argument("--yaw", type=float, default=360.0, help="degrees per loop")
+    ap.add_argument("--sun", type=float, default=1.0, help="sun intensity")
+    ap.add_argument("--sun-elev", type=float, default=35.0, help="sun height, degrees")
+    ap.add_argument("--sun-azim", type=float, default=35.0,
+                    help="sun azimuth in degrees, 0 = along the camera axis")
+    ap.add_argument("--ambient", type=float, default=0.55, help="hemispheric sky light")
+    ap.add_argument("--exposure", type=float, default=1.15, help="tonemap exposure")
+    ap.add_argument("--fill", type=float, default=0.35, help="frontal fill light")
+    ap.add_argument("--rim", type=float, default=0.25, help="back rim light")
+    ap.add_argument("--label", default=None, help="caption on every frame (default: uexgif n/N)")
+    ap.add_argument("--tex-dir", action="append", metavar="DIR",
+                    help="extra folder to look for textures and MI_*.json (repeatable)")
+    ap.add_argument("--quiet", action="store_true", help="no per-frame progress")
     ap.add_argument("--version", action="version", version=f"uexgif {__version__}")
     args = ap.parse_args(argv)
 
-    W, H = (int(x) for x in args.size.lower().split("x"))
+    fmt = args.format or ("gif" if args.out.lower().endswith(".gif") else
+                          "webp" if args.out.lower().endswith(".webp") else "gif")
+    try:
+        W, H = (int(v) for v in args.size.lower().split("x"))
+        if W < 32 or H < 32:
+            raise ValueError
+    except ValueError:
+        ap.error(f"--size expects WIDTHxHEIGHT with both >= 32, got {args.size!r}")
+    if args.frames < 1:
+        ap.error("--frames must be >= 1")
+    if args.fps <= 0:
+        ap.error("--fps must be > 0")
 
-    psk = []
-    for d in args.dirs:
-        if os.path.isdir(d):
-            psk += sorted(glob.glob(os.path.join(d, "**", "*.psk"), recursive=True))
-        elif d.endswith(".psk"):
-            psk.append(d)
+    # un fichier .psk passe directement doit aussi apporter ses textures et ses materiaux
+    search_dirs, psk = [], []
+    for path in args.paths:
+        if os.path.isdir(path):
+            search_dirs.append(path)
+            psk += sorted(glob.glob(os.path.join(path, "**", "*.psk"), recursive=True))
+            psk += sorted(glob.glob(os.path.join(path, "**", "*.pskx"), recursive=True))
+        elif os.path.isfile(path) and path.lower().endswith((".psk", ".pskx")):
+            psk.append(path)
+            search_dirs.append(os.path.dirname(os.path.abspath(path)) or ".")
+        else:
+            raise SystemExit(f"{path}: no such folder or .psk/.pskx file")
+
+    seen, unique = set(), []
+    for f in psk:
+        key = os.path.realpath(f)
+        if key not in seen:
+            seen.add(key)
+            unique.append(f)
+    psk = unique
     if not psk:
-        raise SystemExit("aucun .psk trouvé")
+        raise SystemExit("no .psk/.pskx found in the given paths")
 
-    meshes = [read_psk(p) for p in psk]
-    dirs = [d for d in args.dirs if os.path.isdir(d)]
-    texidx = tex_index(dirs)
-    matdb = find_mat_jsons(dirs, {})
+    search_dirs += [d for d in (args.tex_dir or []) if os.path.isdir(d)]
+    for d in args.tex_dir or []:
+        if not os.path.isdir(d):
+            raise SystemExit(f"--tex-dir {d}: no such folder")
+    search_dirs = list(dict.fromkeys(search_dirs))
+    meshes = [read_psk(f) for f in psk]
+    texidx = tex_index(search_dirs)
+    matdb = find_mat_jsons(search_dirs, {})
     tex_cache = {}
     parts = assemble(meshes, texidx, tex_cache, args.tex, matdb)
 
-    center, half = fit_view(parts)
+    center, half, radius = fit_view(parts)
     margin = 0.92
-    # échelle orthographique : la plus grande dimension tient dans la fenêtre
-    spanx = max(half[0] * 2.0, 1e-6)      # largeur visible
-    spanz = max(half[2] * 2.0, 1e-6)      # hauteur visible
-    scale = min(W * margin / spanx, H * margin / spanz)
+    scale = min(W * margin / (2.0 * max(radius, 1e-6)),
+                H * margin / max(half[2] * 2.0, 1e-6))   # hauteur = axe Z (UE up)
 
     srcs = sorted({v["src"] for v in tex_cache.values() if v and v.get("src")})
-    print(f"{len(parts)} mesh(es), {sum(len(p['pi']) for p in parts)} triangles, "
-          f"materiaux: {len(matdb)} json, textures: {srcs[:8]}")
+    print(f"{len(parts)} mesh(es) from {len(psk)} file(s), "
+          f"{sum(len(p['pi']) for p in parts)} triangles")
+    print(f"materials: {len(matdb)} json | textures: {srcs[:8] or 'none'}")
     missing = [k for k, v in tex_cache.items() if v is None]
     if missing:
-        print(f"  sans texture: {missing}")
-    print(f"bbox: {half * 2} scale={scale:.3f}")
+        print(f"  no texture for: {missing}")
+        if not srcs:
+            print("  hint: a .psk only brings its own folder; pass the export root "
+                  "folder or --tex-dir DIR to find the .png and MI_*.json files")
 
-    frames = []
     if args.frames_dir:
         os.makedirs(args.frames_dir, exist_ok=True)
+
+    pal_frames, rgb_frames = [], []
     for i in range(args.frames):
         ang = args.yaw * i / args.frames
         img = render_frame(parts, ang, W, H, center, scale,
@@ -516,17 +603,30 @@ def main(argv=None):
                            ambient=args.ambient, exposure=args.exposure,
                            fill=args.fill, rim=args.rim)
         im = Image.fromarray(img)
-        label = args.label or f"uexgif {i + 1}/{args.frames} {ang:.0f}deg"
-        _draw_label(im, label)
-        frames.append(im)
+        _draw_label(im, args.label or f"uexgif {i + 1}/{args.frames} {ang:.0f}deg")
         if args.frames_dir:
             im.save(os.path.join(args.frames_dir, f"frame_{i:03d}.png"))
-        print(f"  frame {i + 1}/{args.frames}", flush=True)
+        rgb_frames.append(im)      # sprites et webp gardent tout en RGB, le GIF palettise a la fin
+        if not args.quiet:
+            print(f"  frame {i + 1}/{args.frames}", flush=True)
 
-    dur = int(1000 / args.fps)
-    pal = [f.convert("P", palette=ADAPTIVE, colors=192) for f in frames]
-    pal[0].save(args.out, save_all=True, append_images=pal[1:], duration=dur, loop=0, optimize=True)
-    print(f"ecrit {args.out} ({os.path.getsize(args.out) / 1e6:.1f} Mo, {args.frames} frames)")
+    if fmt == "sprites":
+        _save_sprites(rgb_frames, args.out)
+    elif fmt == "webp":
+        dur = int(round(1000.0 / args.fps))
+        rgb_frames[0].save(args.out, save_all=True, append_images=rgb_frames[1:],
+                           duration=dur, loop=0, quality=90, method=6)
+    else:
+        dur = int(round(1000.0 / args.fps))        # GIF stocke des centiemes: >= 20 ms
+        dur = max(dur, 20)
+        gpal = _global_palette(rgb_frames)
+        no_dither = getattr(Image, "NONE", 0)
+        pals = [f.quantize(palette=gpal, dither=no_dither) for f in rgb_frames]
+        pals[0].save(args.out, save_all=True, append_images=pals[1:], duration=dur,
+                     loop=0, optimize=True, disposal=2)
+
+    print(f"wrote {args.out} ({os.path.getsize(args.out) / 1e6:.1f} MB, "
+          f"{args.frames} frames, {fmt})")
 
 
 if __name__ == "__main__":

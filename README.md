@@ -261,10 +261,12 @@ python3 tools/uexgif/uexgif.py rips/body rips/mask1978 rips/suit1978 \
 
 It reads the `MI_*.json` material files uex writes next to each mesh, so albedo and
 opacity come from the real material (hair stays hair instead of white planes), and
-`--sun`, `--ambient`, `--exposure` tune the shot.
+`--sun`, `--ambient`, `--exposure` tune the shot. `--format webp` gives an animated WebP
+instead of a GIF, `--format sprites` a PNG sheet; `--frames-dir` keeps the frames so you
+can hand them to ffmpeg for a video.
 
-Pure Python, Linux/macOS/Windows. Bind pose only: applying a `.psa` needs skinning, which
-is not implemented yet.
+Pure Python (numpy + Pillow), Linux/macOS/Windows. Bind pose only: applying a `.psa`
+needs skinning, which is not implemented yet.
 
 ## ❓ FAQ
 
