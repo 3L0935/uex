@@ -36,7 +36,14 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):
         pass
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
+
+# Pillow a deplace ses constantes (LANCZOS -> Image.Resampling.LANCZOS,
+# ADAPTIVE -> Image.Palette.ADAPTIVE): on accepte les deux generations.
+_RESAMPLING = getattr(Image, "Resampling", Image)
+_PALETTE = getattr(Image, "Palette", Image)
+LANCZOS = getattr(_RESAMPLING, "LANCZOS", 1)
+ADAPTIVE = getattr(_PALETTE, "ADAPTIVE", 1)
 
 PSK_CHUNK = struct.Struct("<20siii")
 
@@ -181,7 +188,7 @@ def pick_texture(mat, texfiles):
 
 def _load_rgba(path, size):
     im = Image.open(path).convert("RGBA")
-    im.thumbnail((size, size), Image.LANCZOS)
+    im.thumbnail((size, size), LANCZOS)
     a = np.asarray(im, dtype=np.float32) / 255.0
     return a
 
@@ -256,7 +263,7 @@ def material_texture(mat, matdb, texidx, size=512, cache=None):
     if info["alpha"] is not None and info["alpha"].shape != info["rgb"].shape[:2]:
         h, w = info["rgb"].shape[:2]
         a8 = Image.fromarray((np.clip(info["alpha"], 0, 1) * 255).astype(np.uint8))
-        info["alpha"] = np.asarray(a8.resize((w, h), Image.LANCZOS), np.float32) / 255.0
+        info["alpha"] = np.asarray(a8.resize((w, h), LANCZOS), np.float32) / 255.0
     cache[mat] = info
     return info
 
@@ -517,7 +524,7 @@ def main(argv=None):
         print(f"  frame {i + 1}/{args.frames}", flush=True)
 
     dur = int(1000 / args.fps)
-    pal = [f.convert("P", palette=Image.ADAPTIVE, colors=192) for f in frames]
+    pal = [f.convert("P", palette=ADAPTIVE, colors=192) for f in frames]
     pal[0].save(args.out, save_all=True, append_images=pal[1:], duration=dur, loop=0, optimize=True)
     print(f"ecrit {args.out} ({os.path.getsize(args.out) / 1e6:.1f} Mo, {args.frames} frames)")
 
