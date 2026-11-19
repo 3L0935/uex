@@ -246,6 +246,26 @@ You need the .NET 10 SDK.
 
 > `dotnet build` prints NuGet audit warnings for `SixLabors.ImageSharp` 3.1.12 and `Microsoft.Bcl.Memory` 9.0.0. Both come from CUE4Parse-Conversion, which pins ImageSharp to that exact version, so uex cannot bump them on its own.
 
+## 🖼️ Optional tool: uexgif (preview GIFs)
+
+[`tools/uexgif/`](tools/uexgif/) turns an export into something you can look at: it reads
+the `.psk` meshes and `.png` textures `uex export` just wrote, assembles every part
+(body, outfit, mask) in the bind pose, and renders the model turning on itself as a GIF.
+No GPU, no Blender, no engine — numpy + Pillow.
+
+```bash
+pip install -r tools/uexgif/requirements.txt
+python3 tools/uexgif/uexgif.py rips/body rips/mask1978 rips/suit1978 \
+        -o preview.gif --frames 32 --size 480x640
+```
+
+It reads the `MI_*.json` material files uex writes next to each mesh, so albedo and
+opacity come from the real material (hair stays hair instead of white planes), and
+`--sun`, `--ambient`, `--exposure` tune the shot.
+
+Pure Python, Linux/macOS/Windows. Bind pose only: applying a `.psa` needs skinning, which
+is not implemented yet.
+
 ## ❓ FAQ
 
 <details>
